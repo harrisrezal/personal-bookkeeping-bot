@@ -7,6 +7,9 @@ const {
   canConfirmPending,
   buildTransactionFromPending,
   buildReportFromTransactions,
+  formatReport,
+  formatDelta,
+  getPreviousMonthYearMonth,
   PENDING_STATUS,
   TRANSACTION_TYPES
 } = require('../lib/bot');
@@ -32,10 +35,16 @@ async function run() {
   testReportRefundNetting();
   testReportBreakdowns();
   testNormalizeDescription();
+  testFormatDeltaAndComparisonReport();
+  testGetPreviousMonthYearMonth();
   await testExpenseFlow();
   await testExpenseFlowNormalizesDescription();
   await testDuplicateConfirmPrevention();
   await testCancelPreventsInsert();
+  await testUndoNoTransactions();
+  await testUndoDeleteFlow();
+  await testUndoKeepFlow();
+  await testBudgetThresholdMessages();
   console.log('All tests passed.');
 }
 
@@ -224,6 +233,202 @@ async function testCancelPreventsInsert() {
 
   assert.equal(sheets.tables[SHEET_NAMES.transactions].length, 0);
   assert.equal(sheets.tables[SHEET_NAMES.pending][0].status, PENDING_STATUS.cancelled);
+}
+
+function testFormatDeltaAndComparisonReport() {
+  assert.equal(formatDelta(120, 100, 'Last Month'), ' (+20% vs Last Month)');
+  assert.equal(formatDelta(80, 100, 'Last Month'), ' (-20% vs Last Month)');
+  assert.equal(formatDelta(100, 100, 'Last Month'), ' (flat vs Last Month)');
+  assert.equal(formatDelta(50, 0, 'Last Month'), ' (new)');
+  assert.equal(formatDelta(0, 0, 'Last Month'), '');
+
+  const options = { start: new Date(), end: new Date(), timezone: 'UTC', currencySymbol: '$' };
+  const report = buildReportFromTransactions([
+    { type: 'expense', amount: 210, signed_amount: 210, category: 'Dining', payer_name: 'A' }
+  ], { ...options, label: 'This Month' });
+  const previousReport = buildReportFromTransactions([
+    { type: 'expense', amount: 178, signed_amount: 178, category: 'Dining', payer_name: 'A' }
+  ], { ...options, label: 'Last Month' });
+
+  const text = formatReport(report, previousReport);
+  assert.ok(text.includes('Net spend: $210.00 (+18% vs Last Month)'));
+  assert.ok(text.includes('Dining: $210.00 (+18% vs Last Month)'));
+}
+
+function testGetPreviousMonthYearMonth() {
+  assert.deepEqual(getPreviousMonthYearMonth(2026, 6), { year: 2026, month: 5 });
+  assert.deepEqual(getPreviousMonthYearMonth(2026, 1), { year: 2025, month: 12 });
+}
+
+async function testUndoNoTransactions() {
+  const sheets = makeFakeSheets();
+  const telegram = makeFakeTelegram();
+  const bot = createBot({ sheets, telegram, now: () => new Date('2026-06-15T12:00:00Z') });
+
+  await bot.handleUpdate({
+    message: {
+      message_id: 1,
+      text: '/undo',
+      chat: { id: '-100' },
+      from: { id: 123, first_name: 'Harris', username: 'harris' }
+    }
+  });
+
+  assert.equal(telegram.sentMessages.length, 1);
+  assert.equal(telegram.sentMessages[0].text, 'No transactions to undo.');
+}
+
+async function testUndoDeleteFlow() {
+  const sheets = makeFakeSheets();
+  sheets.tables[SHEET_NAMES.transactions].push(seedTransaction({
+    transaction_id: 'tundo1',
+    description: 'Costco Wholesale',
+    amount: 47.46,
+    signed_amount: 47.46
+  }));
+
+  const telegram = makeFakeTelegram();
+  const bot = createBot({ sheets, telegram, now: () => new Date('2026-06-15T12:00:00Z') });
+
+  await bot.handleUpdate({
+    message: {
+      message_id: 1,
+      text: '/undo',
+      chat: { id: '-100' },
+      from: { id: 123, first_name: 'Harris', username: 'harris' }
+    }
+  });
+
+  assert.equal(telegram.sentMessages.length, 1);
+  assert.ok(telegram.sentMessages[0].text.includes('Delete this transaction?'));
+  assert.equal(telegram.sentMessages[0].replyMarkup.inline_keyboard[0][0].callback_data, 'ud:tundo1');
+
+  await bot.handleUpdate({
+    callback_query: {
+      id: 'cb1',
+      data: 'ud:tundo1',
+      from: { id: 123 },
+      message: { message_id: 2, chat: { id: '-100' } }
+    }
+  });
+
+  assert.equal(telegram.callbackAnswers[0].text, 'Deleted.');
+  const remaining = await sheets.getObjects(SHEET_NAMES.transactions, TRANSACTION_HEADERS);
+  assert.equal(remaining.find((t) => t.transaction_id === 'tundo1'), undefined);
+}
+
+async function testUndoKeepFlow() {
+  const sheets = makeFakeSheets();
+  sheets.tables[SHEET_NAMES.transactions].push(seedTransaction({ transaction_id: 'tundo2' }));
+
+  const telegram = makeFakeTelegram();
+  const bot = createBot({ sheets, telegram, now: () => new Date('2026-06-15T12:00:00Z') });
+
+  await bot.handleUpdate({
+    callback_query: {
+      id: 'cb1',
+      data: 'uk:tundo2',
+      from: { id: 123 },
+      message: { message_id: 2, chat: { id: '-100' } }
+    }
+  });
+
+  assert.equal(telegram.callbackAnswers[0].text, 'Kept.');
+  const remaining = await sheets.getObjects(SHEET_NAMES.transactions, TRANSACTION_HEADERS);
+  assert.equal(remaining.length, 1);
+  assert.equal(remaining[0].transaction_id, 'tundo2');
+}
+
+async function testBudgetThresholdMessages() {
+  await assertBudgetFlow({
+    existingSpent: 85,
+    newAmount: 20,
+    expectIncludes: 'has hit its budget',
+    expectExcludes: '80% of its'
+  });
+
+  await assertBudgetFlow({
+    existingSpent: 70,
+    newAmount: 15,
+    expectIncludes: 'of its $100.00 budget this month',
+    expectExcludes: 'has hit its budget'
+  });
+
+  await assertBudgetFlow({
+    existingSpent: 150,
+    newAmount: 10,
+    expectNoBudgetMessage: true
+  });
+}
+
+async function assertBudgetFlow({ existingSpent, newAmount, expectIncludes, expectExcludes, expectNoBudgetMessage }) {
+  const sheets = makeFakeSheets();
+  sheets.tables[SHEET_NAMES.categories] = [
+    { category: 'Shopping', active: 'true', sort_order: 1, budget_amount: 100 }
+  ];
+  sheets.tables[SHEET_NAMES.transactions].push(seedTransaction({
+    transaction_id: 'existing',
+    category: 'Shopping',
+    amount: existingSpent,
+    signed_amount: existingSpent,
+    transaction_date: new Date('2026-06-05T00:00:00Z')
+  }));
+
+  const telegram = makeFakeTelegram();
+  const bot = createBot({ sheets, telegram, now: () => new Date('2026-06-15T12:00:00Z') });
+
+  await bot.handleUpdate({
+    message: {
+      message_id: 1,
+      text: `/expense ${newAmount} Target`,
+      chat: { id: '-100' },
+      from: { id: 123, first_name: 'Harris', username: 'harris' }
+    }
+  });
+  const pendingId = sheets.tables[SHEET_NAMES.pending][0].pending_id;
+  await bot.handleUpdate({
+    callback_query: {
+      id: 'cb1',
+      data: `cat:${pendingId}:shopping`,
+      from: { id: 123 },
+      message: { message_id: 2, chat: { id: '-100' } }
+    }
+  });
+  await bot.handleUpdate({
+    callback_query: {
+      id: 'cb2',
+      data: `ok:${pendingId}`,
+      from: { id: 123 },
+      message: { message_id: 2, chat: { id: '-100' } }
+    }
+  });
+
+  if (expectNoBudgetMessage) {
+    assert.ok(!telegram.sentMessages.some((m) => m.text.includes('budget')), 'expected no budget message');
+    return;
+  }
+
+  assert.ok(telegram.sentMessages.some((m) => m.text.includes(expectIncludes)), `expected a message including "${expectIncludes}"`);
+  assert.ok(!telegram.sentMessages.some((m) => m.text.includes(expectExcludes)), `did not expect a message including "${expectExcludes}"`);
+}
+
+function seedTransaction(overrides) {
+  return {
+    transaction_id: 'seed' + Math.random().toString(36).slice(2),
+    created_at: new Date('2026-06-01T00:00:00Z'),
+    transaction_date: new Date('2026-06-01T00:00:00Z'),
+    telegram_chat_id: '-100',
+    telegram_user_id: '123',
+    telegram_username: 'harris',
+    payer_name: 'Harris',
+    type: TRANSACTION_TYPES.expense,
+    amount: 0,
+    signed_amount: 0,
+    category: 'Shopping',
+    description: 'seed',
+    source_message_id: '0',
+    ...overrides
+  };
 }
 
 function makePending() {

@@ -47,12 +47,15 @@ All three flows end at the same category picker → confirm step before anything
 ## Other commands
 
 ```
-/report_week          — spending report for this week
-/report_current_month — spending report for this month
-/report_month         — pick any month for a report
-/categories           — list active categories
+/report_week          — spending report for this week (vs. last week)
+/report_current_month — spending report for this month (vs. last month)
+/report_month         — pick any month for a report (vs. the month before it)
+/categories           — list active categories (with budgets, if set)
+/undo                 — delete the most recently recorded transaction, with a confirm step
 /help
 ```
+
+Reports show a `(+18% vs last month)`-style delta next to net spend and each category, comparing against the same-length window in the prior period.
 
 ---
 
@@ -173,8 +176,13 @@ Categories live in the `Categories` tab of your Google Sheet. Edit them there at
 | `category` | Display name shown on buttons |
 | `active` | `true` or `false` |
 | `sort_order` | Lower numbers appear first |
+| `budget_amount` | Optional monthly budget. Leave blank for no budget. |
 
 Default categories: Groceries, Dining, Shopping, Transport, Bills, Health, Travel, Entertainment, Home, Personal Care, Gifts, Other.
+
+### Budget alerts
+
+Set a number in a category's `budget_amount` column to get a proactive Telegram message the moment that category's spending for the current month crosses 80% and 100% of the budget. Each threshold only fires once per month, the first time a confirmed transaction pushes spending past it — it won't repeat on every transaction after that. Leave `budget_amount` blank (the default) to opt a category out of budget tracking entirely.
 
 ---
 
