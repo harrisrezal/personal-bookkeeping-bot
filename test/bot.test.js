@@ -16,6 +16,7 @@ const {
   PENDING_HEADERS,
   CATEGORY_HEADERS
 } = require('../lib/schema');
+const { normalizeDescription } = require('../lib/merchant-aliases');
 
 // Lock down to the test chat/user so the ID auto-discovery message doesn't fire
 process.env.ALLOWED_CHAT_ID = '-100';
@@ -30,7 +31,9 @@ async function run() {
   testPendingState();
   testReportRefundNetting();
   testReportBreakdowns();
+  testNormalizeDescription();
   await testExpenseFlow();
+  await testExpenseFlowNormalizesDescription();
   await testDuplicateConfirmPrevention();
   await testCancelPreventsInsert();
   console.log('All tests passed.');
@@ -99,6 +102,42 @@ function testReportBreakdowns() {
   assert.equal(report.netSpend, 25);
   assert.equal(report.categoryTotals.Groceries, 15);
   assert.equal(report.payerTotals.A, 15);
+}
+
+function testNormalizeDescription() {
+  // case-insensitive alias match
+  assert.equal(normalizeDescription('costco'), 'Costco Wholesale');
+  assert.equal(normalizeDescription('COSTCO GAS'), 'Costco Gas');
+  assert.equal(normalizeDescription('target'), 'Target');
+  assert.equal(normalizeDescription('wee!'), 'Weee!');
+  assert.equal(normalizeDescription('Wee'), 'Weee!');
+
+  // AMC store-number regex rule
+  assert.equal(normalizeDescription('AMC 0420 SUNNYVALE 12'), 'AMC Sunnyvale 12');
+
+  // shouted-case fallback for merchants not in the alias map
+  assert.equal(normalizeDescription('WHOLE FOODS MARKET'), 'Whole Foods Market');
+
+  // free-text descriptions pass through unchanged
+  assert.equal(normalizeDescription('dinner with Yifan and Han'), 'dinner with Yifan and Han');
+  assert.equal(normalizeDescription(''), '');
+}
+
+async function testExpenseFlowNormalizesDescription() {
+  const sheets = makeFakeSheets();
+  const telegram = makeFakeTelegram();
+  const bot = createBot({ sheets, telegram, now: () => new Date('2026-06-30T12:00:00Z') });
+
+  await bot.handleUpdate({
+    message: {
+      message_id: 10,
+      text: '/expense 42 costco gas',
+      chat: { id: '-100' },
+      from: { id: 123, first_name: 'Harris', username: 'harris' }
+    }
+  });
+
+  assert.equal(sheets.tables[SHEET_NAMES.pending][0].description, 'Costco Gas');
 }
 
 async function testExpenseFlow() {
