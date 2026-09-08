@@ -178,7 +178,7 @@ Categories live in the `Categories` tab of your Google Sheet. Edit them there at
 | `sort_order` | Lower numbers appear first |
 | `budget_amount` | Optional monthly budget. Leave blank for no budget. |
 
-Default categories: Groceries, Dining, Shopping, Transport, Bills, Health, Travel, Entertainment, Home, Personal Care, Gifts, Other.
+Default categories: Groceries, Dining, Transport, Shopping, Personal Care, Entertainment, Travel, Pets, Other.
 
 ### Budget alerts
 
