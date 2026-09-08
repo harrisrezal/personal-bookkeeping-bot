@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const {
   createBot,
   parseTransactionCommand,
+  parseAmountAndDescription,
   parseCallbackData,
   applySelectedCategory,
   canConfirmPending,
@@ -34,6 +35,8 @@ async function run() {
   testPendingState();
   testReportRefundNetting();
   testReportBreakdowns();
+  testParseAmountAndDescriptionAnyOrder();
+  await testGuidedExpenseAmountLast();
   testNormalizeDescription();
   testFormatDeltaAndComparisonReport();
   testGetPreviousMonthYearMonth();
@@ -70,6 +73,23 @@ function testInvalidAmount() {
 function testMissingDescription() {
   const parsed = parseTransactionCommand('/expense 55', 'expense');
   assert.equal(parsed.ok, false);
+}
+
+function testParseAmountAndDescriptionAnyOrder() {
+  // amount first (original supported form)
+  assert.deepEqual(parseAmountAndDescription('55 Coffee'), { amount: 55, description: 'Coffee' });
+
+  // amount last, no connector word
+  assert.deepEqual(parseAmountAndDescription('Coffee 55'), { amount: 55, description: 'Coffee' });
+
+  // amount last with a "for" connector and a "$" prefix
+  assert.deepEqual(parseAmountAndDescription('Blackwood Thai for $85'), { amount: 85, description: 'Blackwood Thai' });
+
+  // amount first with a "for" connector and a "$" prefix
+  assert.deepEqual(parseAmountAndDescription('$85 for Blackwood Thai'), { amount: 85, description: 'Blackwood Thai' });
+
+  // no amount anywhere in the text
+  assert.equal(parseAmountAndDescription('just a description'), null);
 }
 
 function testCallbackParsing() {
@@ -147,6 +167,40 @@ async function testExpenseFlowNormalizesDescription() {
   });
 
   assert.equal(sheets.tables[SHEET_NAMES.pending][0].description, 'Costco Gas');
+}
+
+async function testGuidedExpenseAmountLast() {
+  const sheets = makeFakeSheets();
+  const telegram = makeFakeTelegram();
+  const bot = createBot({ sheets, telegram, now: () => new Date('2026-06-30T12:00:00Z') });
+
+  // /expense with no args starts the guided flow
+  await bot.handleUpdate({
+    message: {
+      message_id: 1,
+      text: '/expense',
+      chat: { id: '-100' },
+      from: { id: 123, first_name: 'Harris', username: 'harris' }
+    }
+  });
+  assert.equal(sheets.tables[SHEET_NAMES.pending][0].status, PENDING_STATUS.awaitingInput);
+
+  // Amount-last phrasing, exactly the case that used to fail (see bug report):
+  // description before the amount, with a "for" connector and a "$" prefix.
+  await bot.handleUpdate({
+    message: {
+      message_id: 2,
+      text: 'Blackwood Thai for $85',
+      chat: { id: '-100' },
+      from: { id: 123, first_name: 'Harris', username: 'harris' }
+    }
+  });
+
+  const pending = sheets.tables[SHEET_NAMES.pending][0];
+  assert.equal(pending.status, PENDING_STATUS.awaitingCategory);
+  assert.equal(pending.amount, 85);
+  assert.equal(pending.description, 'Blackwood Thai');
+  assert.ok(!telegram.sentMessages.some((m) => m.text.includes('Please enter amount and description')));
 }
 
 async function testExpenseFlow() {
